@@ -1,0 +1,153 @@
+#!/bin/bash
+# ============================================================================
+# swarm — Launch a 3-pane agent swarm for any project
+#
+# Usage:
+#   swarm                     # launch in current directory
+#   swarm ~/Developer/myproj  # launch in specific project
+#
+# Layout:
+# ┌──────────────────────┬──────────────────────┐
+# │    Team Leader       │      Verifier        │
+# │  (implements)        │  (blind QA)          │
+# ├──────────────────────┴──────────────────────┤
+# │        Orchestrator (you talk here)         │
+# └─────────────────────────────────────────────┘
+# ============================================================================
+
+set -euo pipefail
+
+PROJECT_DIR="${1:-$(pwd)}"
+PROJECT_DIR=$(cd "$PROJECT_DIR" && pwd)
+PROJECT_NAME=$(basename "$PROJECT_DIR")
+SESSION="${PROJECT_NAME}-swarm"
+SWARM_DIR="$HOME/.local/share/swarm"
+
+GREEN='\033[0;32m'
+DIM='\033[2m'
+NC='\033[0m'
+
+# Check for existing session
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+    echo -e "${DIM}Swarm '${SESSION}' already exists.${NC}"
+    read -p "Kill and recreate? [y/N] " -n 1 -r
+    echo
+    if [ "$REPLY" = "y" ] || [ "$REPLY" = "Y" ]; then
+        tmux kill-session -t "$SESSION"
+    else
+        if [ -z "${TMUX:-}" ]; then
+            tmux attach -t "$SESSION"
+        else
+            tmux switch-client -t "$SESSION"
+        fi
+        exit 0
+    fi
+fi
+
+echo ""
+echo -e "${GREEN}Launching swarm${NC} — $(basename "$PROJECT_DIR")"
+echo -e "${DIM}Team Leader: 1 | Verifier: 1 | Orchestrator: 1${NC}"
+echo ""
+
+# Create session — one full pane
+tmux new-session -d -s "$SESSION" -c "$PROJECT_DIR" -x 200 -y 50
+
+# Split bottom first — Orchestrator at 40% height (spans full width)
+tmux split-window -v -p 40 -t "$SESSION:1.1" -c "$PROJECT_DIR"
+
+# Now split the TOP pane horizontally — Team Leader | Verifier
+tmux split-window -h -t "$SESSION:1.1" -c "$PROJECT_DIR"
+
+# Layout: pane 1 = top-left (TL), pane 2 = top-right (Verifier), pane 3 = bottom (Orchestrator)
+# But pane order depends on split order, so read them explicitly
+ALL_PANES=$(tmux list-panes -t "$SESSION:1" -F '#{pane_id} #{pane_top} #{pane_left}')
+
+# Bottom pane (highest top value) = Orchestrator
+# Top-left = Team Leader, Top-right = Verifier
+TL_PANE=$(echo "$ALL_PANES" | sort -k2,2n -k3,3n | head -1 | awk '{print $1}')
+VF_PANE=$(echo "$ALL_PANES" | sort -k2,2n -k3,3nr | head -1 | awk '{print $1}')
+ORCH_PANE=$(echo "$ALL_PANES" | sort -k2,2nr | head -1 | awk '{print $1}')
+
+echo "  Team Leader:  ${TL_PANE}"
+echo "  Verifier:     ${VF_PANE}"
+echo "  Orchestrator: ${ORCH_PANE}"
+echo ""
+
+# Write startup prompts to files (avoids tmux send-keys garbling)
+cat > /tmp/swarm-tl-startup.md << TLEOF
+Read the file ${SWARM_DIR}/team-leader.md and follow those instructions exactly.
+
+You are the Team Leader.
+Session: ${SESSION}
+Project: ${PROJECT_DIR}
+Your pane: ${TL_PANE}
+
+Confirm you're ready and waiting for dispatch documents.
+TLEOF
+
+cat > /tmp/swarm-vf-startup.md << VFEOF
+Read the file ${SWARM_DIR}/verifier.md and follow those instructions exactly.
+
+You are the Verifier.
+Session: ${SESSION}
+Project: ${PROJECT_DIR}
+Your pane: ${VF_PANE}
+
+Confirm you're ready and waiting for verification tasks.
+VFEOF
+
+cat > /tmp/swarm-orch-startup.md << ORCHEOF
+Read the file ${SWARM_DIR}/orchestrator.md and follow those instructions exactly.
+
+You are the Orchestrator.
+Session: ${SESSION}
+Project: ${PROJECT_DIR}
+Team Leader pane: ${TL_PANE}
+Verifier pane: ${VF_PANE}
+Your pane: ${ORCH_PANE}
+
+IMPORTANT: After you dispatch work to the Team Leader, IMMEDIATELY set up monitoring:
+/loop 1m run this command and report any changes: tmux capture-pane -t ${TL_PANE} -p | grep -E "SWARM STATUS|SWARM RESULT"
+
+Confirm you're ready. The user will give you tasks.
+ORCHEOF
+
+# Start Claude Code in all three panes
+tmux send-keys -t "$TL_PANE" \
+    "cd '$PROJECT_DIR' && claude --dangerously-skip-permissions --verbose" Enter
+tmux send-keys -t "$VF_PANE" \
+    "cd '$PROJECT_DIR' && claude --dangerously-skip-permissions --verbose" Enter
+tmux send-keys -t "$ORCH_PANE" \
+    "cd '$PROJECT_DIR' && claude --dangerously-skip-permissions --verbose" Enter
+
+echo "Starting Claude Code in all panes..."
+sleep 8
+
+# Send startup prompts
+tmux send-keys -t "$TL_PANE" -l "Read /tmp/swarm-tl-startup.md and follow those instructions." && sleep 0.3
+tmux send-keys -t "$TL_PANE" Enter
+
+sleep 1
+
+tmux send-keys -t "$VF_PANE" -l "Read /tmp/swarm-vf-startup.md and follow those instructions." && sleep 0.3
+tmux send-keys -t "$VF_PANE" Enter
+
+sleep 1
+
+tmux send-keys -t "$ORCH_PANE" -l "Read /tmp/swarm-orch-startup.md and follow those instructions." && sleep 0.3
+tmux send-keys -t "$ORCH_PANE" Enter
+
+# Focus orchestrator pane
+tmux select-pane -t "$ORCH_PANE"
+
+echo ""
+echo -e "${GREEN}Swarm is live!${NC}"
+echo ""
+echo "  Attach:  tmux attach -t ${SESSION}"
+echo "  You talk to the orchestrator (bottom pane)"
+echo ""
+
+# Auto-attach if not inside tmux
+if [ -z "${TMUX:-}" ]; then
+    tmux attach -t "$SESSION"
+fi
