@@ -8,11 +8,16 @@
 #
 # Layout:
 # ┌──────────────────────┬──────────────────────┐
-# │    Team Leader       │      Verifier        │
-# │  (implements)        │  (blind QA)          │
+# │    Team Leader       │   Verifier (idle)    │
+# │  (implements)        │   (starts on demand) │
 # ├──────────────────────┴──────────────────────┤
 # │        Orchestrator (you talk here)         │
 # └─────────────────────────────────────────────┘
+#
+# Token optimization:
+# - Verifier pane stays as a shell until needed (no idle Claude session)
+# - Orchestrator starts the Verifier only when Team Leader reports done
+# - Team Leader uses Sonnet for worker teammates (cheaper)
 # ============================================================================
 
 set -euo pipefail
@@ -21,7 +26,7 @@ PROJECT_DIR="${1:-$(pwd)}"
 PROJECT_DIR=$(cd "$PROJECT_DIR" && pwd)
 PROJECT_NAME=$(basename "$PROJECT_DIR")
 SESSION="${PROJECT_NAME}-swarm"
-SWARM_DIR="$HOME/.local/share/swarm"
+SWARM_DIR="$HOME/Developer/agent-swarm/roles"
 
 GREEN='\033[0;32m'
 DIM='\033[2m'
@@ -46,7 +51,7 @@ fi
 
 echo ""
 echo -e "${GREEN}Launching swarm${NC} — $(basename "$PROJECT_DIR")"
-echo -e "${DIM}Team Leader: 1 | Verifier: 1 | Orchestrator: 1${NC}"
+echo -e "${DIM}Team Leader: 1 | Verifier: on-demand | Orchestrator: 1${NC}"
 echo ""
 
 # Create session — one full pane
@@ -58,22 +63,19 @@ tmux split-window -v -p 40 -t "$SESSION:1.1" -c "$PROJECT_DIR"
 # Now split the TOP pane horizontally — Team Leader | Verifier
 tmux split-window -h -t "$SESSION:1.1" -c "$PROJECT_DIR"
 
-# Layout: pane 1 = top-left (TL), pane 2 = top-right (Verifier), pane 3 = bottom (Orchestrator)
-# But pane order depends on split order, so read them explicitly
+# Read pane positions to identify roles
 ALL_PANES=$(tmux list-panes -t "$SESSION:1" -F '#{pane_id} #{pane_top} #{pane_left}')
 
-# Bottom pane (highest top value) = Orchestrator
-# Top-left = Team Leader, Top-right = Verifier
 TL_PANE=$(echo "$ALL_PANES" | sort -k2,2n -k3,3n | head -1 | awk '{print $1}')
 VF_PANE=$(echo "$ALL_PANES" | sort -k2,2n -k3,3nr | head -1 | awk '{print $1}')
 ORCH_PANE=$(echo "$ALL_PANES" | sort -k2,2nr | head -1 | awk '{print $1}')
 
 echo "  Team Leader:  ${TL_PANE}"
-echo "  Verifier:     ${VF_PANE}"
+echo "  Verifier:     ${VF_PANE} (idle until needed)"
 echo "  Orchestrator: ${ORCH_PANE}"
 echo ""
 
-# Write startup prompts to files (avoids tmux send-keys garbling)
+# Write startup prompts to files
 cat > /tmp/swarm-tl-startup.md << TLEOF
 Read the file ${SWARM_DIR}/team-leader.md and follow those instructions exactly.
 
@@ -109,28 +111,33 @@ Your pane: ${ORCH_PANE}
 IMPORTANT: After you dispatch work to the Team Leader, IMMEDIATELY set up monitoring:
 /loop 1m run this command and report any changes: tmux capture-pane -t ${TL_PANE} -p | grep -E "SWARM STATUS|SWARM RESULT"
 
+TOKEN SAVING: The Verifier pane is idle (just a shell). When the Team Leader reports ALL TASKS COMPLETE, start the Verifier with these exact commands:
+  tmux send-keys -t ${VF_PANE} "claude --dangerously-skip-permissions --verbose" Enter
+  (wait 6 seconds)
+  tmux send-keys -t ${VF_PANE} -l "Read /tmp/swarm-vf-startup.md and follow those instructions." && sleep 0.5 && tmux send-keys -t ${VF_PANE} Enter
+After verification is done, shut down the Verifier to save tokens:
+  tmux send-keys -t ${VF_PANE} "/exit" Enter
+
 Confirm you're ready. The user will give you tasks.
 ORCHEOF
 
-# Start Claude Code in all three panes
+# Start Claude Code ONLY in Team Leader and Orchestrator
+# Verifier stays as idle shell — orchestrator starts it on demand
 tmux send-keys -t "$TL_PANE" \
-    "cd '$PROJECT_DIR' && claude --dangerously-skip-permissions --verbose" Enter
-tmux send-keys -t "$VF_PANE" \
     "cd '$PROJECT_DIR' && claude --dangerously-skip-permissions --verbose" Enter
 tmux send-keys -t "$ORCH_PANE" \
     "cd '$PROJECT_DIR' && claude --dangerously-skip-permissions --verbose" Enter
 
-echo "Starting Claude Code in all panes..."
+# Verifier pane just shows a waiting message
+tmux send-keys -t "$VF_PANE" \
+    "echo '⏸  Verifier — idle until orchestrator starts it'" Enter
+
+echo "Starting Claude Code (2 panes, verifier on-demand)..."
 sleep 8
 
-# Send startup prompts
+# Send startup prompts (only TL and Orchestrator)
 tmux send-keys -t "$TL_PANE" -l "Read /tmp/swarm-tl-startup.md and follow those instructions." && sleep 0.3
 tmux send-keys -t "$TL_PANE" Enter
-
-sleep 1
-
-tmux send-keys -t "$VF_PANE" -l "Read /tmp/swarm-vf-startup.md and follow those instructions." && sleep 0.3
-tmux send-keys -t "$VF_PANE" Enter
 
 sleep 1
 
@@ -145,6 +152,7 @@ echo -e "${GREEN}Swarm is live!${NC}"
 echo ""
 echo "  Attach:  tmux attach -t ${SESSION}"
 echo "  You talk to the orchestrator (bottom pane)"
+echo "  Verifier starts automatically when needed"
 echo ""
 
 # Auto-attach if not inside tmux

@@ -53,6 +53,8 @@ Decide:
 
 ### Step 3: Spawn workers and dispatch
 
+**Use `model: "sonnet"` for all worker teammates.** Sonnet is cheaper and fast enough for implementation. Save Opus for complex architectural work only.
+
 Each worker prompt MUST include:
 
 1. **Project context** — path, stack, conventions from CLAUDE.md

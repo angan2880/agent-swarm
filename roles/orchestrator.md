@@ -110,9 +110,11 @@ Tell the user: "Dispatched to Team Leader. Monitoring now."
 
 Relay status to the user as it changes.
 
-### Step 6: Send to Verifier (when Team Leader reports COMPLETE)
+### Step 6: Start Verifier and Send Verification (when Team Leader reports COMPLETE)
 
-When you see `[SWARM STATUS] ALL TASKS COMPLETE`, write a verification task and send it to the Verifier.
+When you see `[SWARM STATUS] ALL TASKS COMPLETE`:
+
+**First, write the verification task file:**
 
 **CRITICAL: The verification task must contain ONLY acceptance criteria. NEVER include what was changed, which files were modified, how it was implemented, or any implementation details.**
 
@@ -146,11 +148,23 @@ How to test:
 - Visual verification preferred — use simulator screenshots and interaction
 - Report PASS or FAIL per criterion with evidence
 VERIFY_EOF
-
-tmux send-keys -t VERIFIER_PANE -l "Read /tmp/swarm-verify.md and verify it." && sleep 0.5 && tmux send-keys -t VERIFIER_PANE Enter
 ```
 
-Tell the user: "Implementation complete. Sent to Verifier for blind QA."
+**Then, start the Verifier (it's idle until now to save tokens):**
+
+```bash
+# Start Claude Code in the Verifier pane
+tmux send-keys -t VERIFIER_PANE "claude --dangerously-skip-permissions --verbose" Enter
+```
+
+**Wait 6 seconds for Claude to start, then send the startup + verification task:**
+
+```bash
+# Send startup instructions + verification task
+tmux send-keys -t VERIFIER_PANE -l "Read /tmp/swarm-vf-startup.md and follow those instructions. Then immediately read /tmp/swarm-verify.md and verify it." && sleep 0.5 && tmux send-keys -t VERIFIER_PANE Enter
+```
+
+Tell the user: "Implementation complete. Starting Verifier for blind QA..."
 
 ### Step 7: Monitor Verifier
 
@@ -164,7 +178,12 @@ Or manually: `tmux capture-pane -t VERIFIER_PANE -p | tail -40`
 
 ### Step 8: Handle Results
 
-**All PASS:** Tell the user. Ask about committing.
+**All PASS:**
+1. Shut down the Verifier to save tokens:
+   ```bash
+   tmux send-keys -t VERIFIER_PANE "/exit" Enter
+   ```
+2. Tell the user the results. Ask about committing.
 
 **Any FAIL:**
 1. Read the Verifier's failure report (exact symptoms, evidence)
